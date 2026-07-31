@@ -1,18 +1,25 @@
-"""ABC Company dashboard — a LaunchDarkly release-safety demo.
+"""ABC Company landing page — a LaunchDarkly targeting demo.
 
 Run it with:  python app.py     (see README.md for full setup)
 
-What this file wires together:
+The landing page revamp is being rolled out one audience at a time. A single
+LaunchDarkly flag decides which hero each visitor sees, and this app makes the
+*decision* visible: for every visitor it shows which variation was served and
+which targeting mechanism produced it — an individual target, a targeting rule,
+or the flag's default rule.
 
-* `/`                    renders the dashboard for a chosen persona, with the
-                         feature flag evaluated server-side.
-* `/api/stream`          a Server-Sent Events stream. The browser holds it open;
-                         when the flag changes, the freshly rendered panel is
-                         pushed down it and swapped in with no page reload.
-* `/api/report-bug`      sends a custom metric event to LaunchDarkly — the
-                         signal that would tell you a release is going wrong.
-* `/api/remediate`       fires the kill switch (trigger URL or REST API).
-* `/api/self-test/*`     only active in the offline self-test mode.
+Routes:
+
+* `/`                     the landing page, rendered for a chosen visitor with
+                          the flag evaluated server-side.
+* `/api/stream`           a Server-Sent Events stream. The browser holds it
+                          open; when targeting changes in LaunchDarkly the
+                          freshly rendered hero is pushed down it and swapped in
+                          with no page reload.
+* `/api/cta-click`        sends a custom conversion metric event, so variations
+                          can be compared on real signal.
+* `/api/offline/*`        only active in offline demo mode.
+* `/healthz`              liveness plus the number of open streams.
 """
 
 import json
@@ -25,20 +32,19 @@ from datetime import datetime
 from flask import Flask, Response, jsonify, render_template, request
 
 import config
-import ld_integration
-import personas
-import remediation
-from features import order_insights
+import contexts
+import ld_client
+from components import hero
 from session_hub import Session, SessionHub
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-7s %(name)s: %(message)s")
-log = logging.getLogger("abc.dashboard")
+log = logging.getLogger("abc.landing")
 
 app = Flask(__name__)
 hub = SessionHub()
 
-# How long the SSE loop waits for an update before emitting a keep-alive comment.
-# Keep-alives stop proxies and browsers from dropping an idle connection.
+# How long the SSE loop waits for an update before emitting a keep-alive
+# comment. Keep-alives stop proxies and browsers dropping an idle connection.
 _SSE_HEARTBEAT_SECONDS = 15
 
 
@@ -47,42 +53,62 @@ _SSE_HEARTBEAT_SECONDS = 15
 # ---------------------------------------------------------------------------
 
 
-def render_panel(flag_on: bool) -> str:
-    """Render whichever version of the feature the flag selected.
+def render_hero(variation: str) -> str:
+    """Render whichever hero the flag selected.
 
     Called from request threads *and* from LaunchDarkly's listener thread, so it
-    pushes an application context explicitly (nesting one is harmless).
+    pushes a Flask application context explicitly (nesting one is harmless).
     """
-    view = order_insights.build_view(flag_on)
-    template = "panels/order_insights_v2.html" if flag_on else "panels/order_insights_legacy.html"
+    view = hero.build_hero(variation)
     with app.app_context():
-        return render_template(template, view=view)
+        return render_template("hero.html", hero=view)
 
 
-def build_state(persona_id: str, flag_on: bool | None = None, source: str = "initial") -> dict:
-    """Assemble everything the browser needs to display the current state.
+def build_state(visitor_id: str, variation: str | None = None, source: str = "initial") -> dict:
+    """Assemble everything the browser needs to render and explain the page.
 
-    The flag is always re-evaluated so the UI can show *why* the value is what
-    it is ("flag turned off" vs "matched a targeting rule"). `flag_on`, when the
-    listener supplies it, is the authoritative value for the change that just
-    fired, so it wins over the re-read.
+    The flag is always re-evaluated so the UI can show *why* this visitor got
+    this hero. When the change listener supplies `variation`, that is the
+    authoritative value for the change that just fired, so it wins over the
+    re-read.
     """
-    persona = personas.PERSONAS[persona_id]
-    context = personas.build_context(persona_id)
+    visitor = contexts.VISITORS[visitor_id]
+    context = contexts.build_context(visitor_id)
 
-    evaluation = ld_integration.evaluate(context)
-    if flag_on is not None:
-        evaluation["value"] = flag_on
+    evaluation = ld_client.evaluate(context)
+    if variation is not None:
+        evaluation["variation"] = variation
+
+    served = evaluation["variation"]
 
     return {
         "flagKey": config.FLAG_KEY,
-        "flagValue": evaluation["value"],
+        "variation": served,
+        "variationIndex": evaluation["variationIndex"],
+        "mechanism": evaluation["mechanism"],
         "reasonKind": evaluation["reasonKind"],
         "reasonText": evaluation["reasonText"],
+        "ruleId": evaluation["ruleId"],
         "isFallback": evaluation["isFallback"],
-        "persona": {"id": persona_id, **persona},
-        "variantLabel": "Order Insights v2 — new" if evaluation["value"] else "Order Insights v1 — current",
-        "panelHtml": render_panel(evaluation["value"]),
+        "visitor": {
+            "id": visitor_id,
+            "key": visitor["key"],
+            "name": visitor["name"],
+            "title": visitor["title"],
+            "blurb": visitor["blurb"],
+        },
+        "attributes": contexts.context_summary(visitor_id),
+        # Shown side by side with the actual result so you can confirm your
+        # targeting matches what the README asked you to build.
+        "expected": {
+            "variation": visitor["expected_variation"],
+            "via": visitor["expected_via"],
+            "matches": (
+                served == visitor["expected_variation"]
+                and evaluation["reasonKind"] == visitor["expected_via"]
+            ),
+        },
+        "heroHtml": render_hero(served),
         "timestamp": datetime.now().strftime("%H:%M:%S"),
         "source": source,
     }
@@ -95,19 +121,18 @@ def build_state(persona_id: str, flag_on: bool | None = None, source: str = "ini
 
 @app.get("/")
 def index():
-    persona_id = personas.resolve_persona_id(request.args.get("user"))
-    state = build_state(persona_id)
+    visitor_id = contexts.resolve_visitor_id(request.args.get("visitor"))
+    state = build_state(visitor_id)
     return render_template(
         "index.html",
         state=state,
-        # The panel is already rendered into the page, so leave its HTML out of
+        # The hero is already rendered into the page, so leave its HTML out of
         # the JSON handed to the browser rather than shipping it twice.
-        bootstrap_state={key: value for key, value in state.items() if key != "panelHtml"},
-        personas=personas.PERSONAS,
+        bootstrap_state={key: value for key, value in state.items() if key != "heroHtml"},
+        visitors=contexts.VISITORS,
         flag_key=config.FLAG_KEY,
-        remediation_ready=remediation.is_configured(),
-        remediation_method=remediation.describe_configuration(),
-        offline_self_test=config.OFFLINE_SELF_TEST,
+        offline_demo=config.OFFLINE_DEMO,
+        offline_targeting_on=ld_client.offline_is_targeting_on() if config.OFFLINE_DEMO else None,
     )
 
 
@@ -120,28 +145,29 @@ def index():
 def stream():
     """Open an SSE stream for one browser tab.
 
-    The tab supplies its own `session` id so it can reconnect to the same
-    logical session, and the persona it is currently viewing.
+    The tab supplies its own `session` id and the visitor it is currently
+    impersonating. Switching visitor re-opens the stream so the server registers
+    a listener for the new LaunchDarkly context.
     """
     session_id = request.args.get("session") or uuid.uuid4().hex
-    persona_id = personas.resolve_persona_id(request.args.get("user"))
-    context = personas.build_context(persona_id)
+    visitor_id = contexts.resolve_visitor_id(request.args.get("visitor"))
+    context = contexts.build_context(visitor_id)
 
-    def on_flag_change(session: Session, new_value: bool) -> dict:
-        """Runs on the LaunchDarkly SDK thread when the flag value changes."""
+    def on_flag_change(session: Session, new_variation: str) -> dict:
+        """Runs on the LaunchDarkly SDK thread when the value changes."""
         log.info(
-            "Flag '%s' changed to %s for %s — pushing to session %s",
-            config.FLAG_KEY, new_value, session.persona_id, session.id,
+            "Flag '%s' changed to '%s' for %s — pushing to session %s",
+            config.FLAG_KEY, new_variation, session.visitor_id, session.id,
         )
-        return build_state(session.persona_id, flag_on=new_value, source="flag-change")
+        return build_state(session.visitor_id, variation=new_variation, source="flag-change")
 
-    session = hub.open(session_id, persona_id, context, on_flag_change)
+    session = hub.open(session_id, visitor_id, context, on_flag_change)
 
     def event_stream():
         try:
-            # Send the current state immediately so the tab is correct even if
-            # the flag changed between the page render and the stream opening.
-            yield _sse("state", build_state(persona_id, source="connected"))
+            # Send current state immediately, so the tab is correct even if
+            # targeting changed between the page render and the stream opening.
+            yield _sse("state", build_state(visitor_id, source="connected"))
             while True:
                 try:
                     payload = session.queue.get(timeout=_SSE_HEARTBEAT_SECONDS)
@@ -173,63 +199,50 @@ def _sse(event: str, data: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Metrics and remediation
+# Metrics
 # ---------------------------------------------------------------------------
 
 
-@app.post("/api/report-bug")
-def report_bug():
-    """Record that a user hit a problem with the feature currently being served.
+@app.post("/api/cta-click")
+def cta_click():
+    """Record that this visitor clicked the hero's primary call to action.
 
-    In a real rollout this is the signal that justifies the rollback: attach the
-    `order-insights-issue-reported` metric to the flag in LaunchDarkly and you
-    can watch error rates per variation while the release is in flight.
+    This is the measurement half of a safe rollout. Attach the
+    `landing-page-cta-click` metric to the flag in LaunchDarkly and you can
+    compare conversion per variation while the revamp is in flight, rather than
+    arguing about which hero is better.
     """
-    persona_id = personas.resolve_persona_id(request.json.get("user") if request.is_json else None)
-    context = personas.build_context(persona_id)
-    state = ld_integration.evaluate(context)
+    payload = request.get_json(silent=True) or {}
+    visitor_id = contexts.resolve_visitor_id(payload.get("visitor"))
+    context = contexts.build_context(visitor_id)
+    evaluation = ld_client.evaluate(context)
 
-    ld_integration.track(
-        "order-insights-issue-reported",
+    ld_client.track(
+        "landing-page-cta-click",
         context,
-        {"variant": "v2" if state["value"] else "legacy"},
+        {"variation": evaluation["variation"], "mechanism": evaluation["mechanism"]},
     )
-    log.warning("Issue reported by %s while seeing variant=%s", persona_id, state["value"])
-    return jsonify({"ok": True, "message": "Issue reported to LaunchDarkly as a custom metric event."})
-
-
-@app.post("/api/remediate")
-def remediate():
-    """Fire the kill switch: turn the release flag off for everyone, now.
-
-    The response only reports that LaunchDarkly accepted the request. The UI
-    change arrives separately, over the SSE stream, when the SDK receives the
-    flag update — exactly as it would for any other client of your system.
-    """
-    ok, message = remediation.kill_switch()
-    log.warning("Kill switch requested: ok=%s (%s)", ok, message)
-    return jsonify({"ok": ok, "message": message}), (200 if ok else 502)
-
-
-@app.post("/api/restore")
-def restore():
-    """Turn the flag back on (REST API path only) so you can re-run the demo."""
-    ok, message = remediation.restore()
-    return jsonify({"ok": ok, "message": message}), (200 if ok else 502)
+    log.info("CTA click by %s on variation '%s'", visitor_id, evaluation["variation"])
+    return jsonify({
+        "ok": True,
+        "message": f"Conversion event sent to LaunchDarkly for variation '{evaluation['variation']}'.",
+    })
 
 
 # ---------------------------------------------------------------------------
-# Offline self-test (OFFLINE_SELF_TEST=1 only) — see README
+# Offline demo mode (OFFLINE_DEMO=1 only) — see README
 # ---------------------------------------------------------------------------
 
 
-@app.post("/api/self-test/toggle")
-def self_test_toggle():
-    if not config.OFFLINE_SELF_TEST:
-        return jsonify({"ok": False, "message": "Offline self-test is not enabled."}), 404
-    value = bool(request.json.get("value")) if request.is_json else False
-    ld_integration.self_test_set_flag(value)
-    return jsonify({"ok": True, "message": f"In-memory flag set to {value}."})
+@app.post("/api/offline/targeting")
+def offline_targeting():
+    """Turn the in-memory flag on/off, mimicking the LaunchDarkly kill switch."""
+    if not config.OFFLINE_DEMO:
+        return jsonify({"ok": False, "message": "Offline demo mode is not enabled."}), 404
+    payload = request.get_json(silent=True) or {}
+    on = bool(payload.get("on"))
+    ld_client.offline_set_targeting(on)
+    return jsonify({"ok": True, "message": f"Targeting turned {'on' if on else 'off'}."})
 
 
 @app.get("/healthz")
@@ -244,34 +257,36 @@ def healthz():
 
 def main() -> int:
     print("=" * 78)
-    print("  ABC Company — Order Insights dashboard (LaunchDarkly demo)")
+    print("  ABC Company — landing page hero (LaunchDarkly targeting demo)")
     print("=" * 78)
 
-    if not ld_integration.initialize():
+    if not ld_client.initialize():
         print(
             "\n*** LaunchDarkly did not initialize.\n"
             "    Check that LAUNCHDARKLY_SDK_KEY in your .env is a valid server-side\n"
             "    SDK key (it starts with 'sdk-') and that this machine can reach\n"
-            "    https://stream.launchdarkly.com. See README.md -> Troubleshooting.\n",
+            "    https://stream.launchdarkly.com.\n"
+            "    No account handy? Run:  OFFLINE_DEMO=1 python app.py\n"
+            "    See README.md -> Troubleshooting.\n",
             file=sys.stderr,
         )
         return 1
 
-    mode = "OFFLINE SELF-TEST (not connected to LaunchDarkly)" if config.OFFLINE_SELF_TEST else "connected to LaunchDarkly"
-    print(f"  SDK status      : {mode}")
-    print(f"  Feature flag    : {config.FLAG_KEY}")
-    print(f"  Remediation via : {remediation.describe_configuration()}")
-    print(f"  Dashboard       : http://{config.HOST}:{config.PORT}/")
+    mode = "OFFLINE DEMO (not connected)" if config.OFFLINE_DEMO else "connected to LaunchDarkly"
+    print(f"  SDK status   : {mode}")
+    print(f"  Feature flag : {config.FLAG_KEY}")
+    print(f"  Variations   : {', '.join(ld_client.VARIATIONS)}")
+    print(f"  Landing page : http://{config.HOST}:{config.PORT}/")
     print("=" * 78, flush=True)
 
     try:
         # threaded=True is required: every open browser tab holds one SSE
         # connection (and therefore one worker thread) for as long as it is open.
-        # use_reloader=False keeps a single SDK client per process.
+        # use_reloader=False keeps exactly one SDK client per process.
         app.run(host=config.HOST, port=config.PORT, threaded=True, use_reloader=False)
     finally:
         hub.close_all()
-        ld_integration.shutdown()
+        ld_client.shutdown()
         print("\nLaunchDarkly client closed. Goodbye.")
     return 0
 

@@ -1,146 +1,124 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ABC Company &middot; Order Insights</title>
+  <title>ABC Company — landing page targeting demo</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>&#9679;</text></svg>">
+  <link rel="icon" href="data:,">
 </head>
 <body>
 
+{% if offline_demo %}
+  <div class="banner">
+    <strong>Offline demo mode.</strong>
+    Not connected to LaunchDarkly — the flag, its individual target, and its
+    targeting rule are served by an in-process data source running the SDK's
+    real evaluation engine. Restart without <code>OFFLINE_DEMO=1</code> to use
+    your own account.
+    <span class="banner-actions">
+      <button class="btn btn-tiny" data-offline-targeting="true">Targeting ON</button>
+      <button class="btn btn-tiny" data-offline-targeting="false">Targeting OFF</button>
+    </span>
+  </div>
+{% endif %}
+
 <header class="topbar">
-  <div class="brand">
-    <span class="brand-mark">ABC</span>
-    <span class="brand-name">Company&nbsp;<span class="brand-sub">Operations Cloud</span></span>
+  <div class="topbar-title">
+    <span class="dot"></span>
+    ABC Company · landing page revamp
   </div>
 
-  <!-- Switching personas re-opens the live stream for a different LaunchDarkly
-       context. It is how you show one flag serving different values to
-       different people at the same moment. -->
-  <div class="persona-switch" role="group" aria-label="View the dashboard as">
-    <span class="persona-switch-label">Signed in as</span>
-    {% for persona_id, persona in personas.items() %}
-      <button class="persona-btn{{ ' is-active' if persona_id == state.persona.id }}"
-              data-persona="{{ persona_id }}"
-              title="{{ persona.blurb }}">
-        {{ persona.name }}
-        <span class="persona-btn-role">{{ persona.title }}</span>
+  {# Switching visitor re-opens the SSE stream so the server evaluates the flag
+     for a different LaunchDarkly context. Nothing about the page reloads. #}
+  <div class="visitor-switch" role="group" aria-label="Preview as visitor">
+    <span class="visitor-switch-label">Preview as</span>
+    {% for visitor_id, visitor in visitors.items() %}
+      <button class="visitor-btn {% if visitor_id == state.visitor.id %}is-active{% endif %}"
+              data-visitor="{{ visitor_id }}"
+              title="{{ visitor.title }}">
+        {{ visitor.name }}
       </button>
     {% endfor %}
   </div>
 </header>
 
-{% if offline_self_test %}
-<div class="banner banner-warn">
-  <strong>Offline self-test mode.</strong> This app is not connected to LaunchDarkly; the flag
-  is served from an in-memory test data source. Unset <code>OFFLINE_SELF_TEST</code> in your
-  <code>.env</code> for the real demo.
-</div>
-{% endif %}
-
 <main class="layout">
 
-  <!-- ===== The feature ==================================================== -->
-  <section class="feature-column">
-    <div class="feature-meta">
-      <span class="variant-badge" id="variant-badge">{{ state.variantLabel }}</span>
-      <span class="updated" id="updated-at">rendered at {{ state.timestamp }}</span>
-    </div>
+  {# ------------------------------------------------------------------- #}
+  {# The flagged component. Everything inside is replaced when targeting  #}
+  {# changes — this is the only part of the page the flag controls.       #}
+  {# ------------------------------------------------------------------- #}
+  <div class="page-column">
+    <div id="hero-mount" class="hero-mount">{{ state.heroHtml | safe }}</div>
+  </div>
 
-    <!-- The server renders the initial panel; after that, every update to this
-         element arrives over the SSE stream in static/js/app.js. -->
-    <div id="feature-panel" class="panel-host">
-      {{ state.panelHtml | safe }}
-    </div>
+  {# ------------------------------------------------------------------- #}
+  {# The targeting inspector. Not part of the landing page — it exists to #}
+  {# make the flag decision visible while you demo.                       #}
+  {# ------------------------------------------------------------------- #}
+  <aside class="rail">
 
-    <p class="footnote">
-      Both versions of this panel live in <code>features/order_insights.py</code>.
-      The flag decides which one renders; neither knows LaunchDarkly exists.
-    </p>
-  </section>
-
-  <!-- ===== Release control rail =========================================== -->
-  <aside class="control-column">
-
-    <div class="card">
-      <h2 class="card-title">Release control</h2>
-
-      <div class="flag-row">
-        <code class="flag-key">{{ flag_key }}</code>
-        <span class="state-pill" id="state-pill">…</span>
+    <section class="card">
+      <h2>Flag</h2>
+      <p class="flag-key"><code>{{ flag_key }}</code></p>
+      <div class="variation-row">
+        <span id="variation-pill" class="variation-pill var-{{ state.variation }}">{{ state.variation }}</span>
+        <span id="variation-index" class="muted small">index {{ state.variationIndex }}</span>
       </div>
+    </section>
 
-      <p class="reason" id="reason-text">{{ state.reasonText }}</p>
-
-      <dl class="kv">
-        <dt>Evaluated for</dt>
-        <dd id="eval-context">{{ state.persona.name }} <span class="muted">({{ state.persona.key }})</span></dd>
-        <dt>Attributes</dt>
-        <dd class="attrs" id="eval-attrs">
-          <span class="chip">role: {{ state.persona.role }}</span>
-          <span class="chip">betaTester: {{ state.persona.betaTester | lower }}</span>
-          <span class="chip">plan: {{ state.persona.plan }}</span>
-        </dd>
-        <dt>Live connection</dt>
-        <dd><span class="conn" id="conn-status">connecting…</span></dd>
-      </dl>
-
-      <p class="hint">
-        Toggle <code>{{ flag_key }}</code> in LaunchDarkly and watch this page change.
-        Do not refresh — that is the point.
+    <section class="card">
+      <h2>How this visitor matched</h2>
+      <span id="mechanism-badge" class="mechanism mech-{{ state.mechanism }}">{{ state.reasonKind }}</span>
+      <p id="reason-text" class="reason">{{ state.reasonText }}</p>
+      <p id="expected-line" class="expected {% if state.expected.matches %}ok{% else %}pending{% endif %}">
+        {% if state.expected.matches %}✓{% else %}·{% endif %}
+        Expected <b>{{ state.expected.variation }}</b> via <b>{{ state.expected.via }}</b>
       </p>
-    </div>
+    </section>
 
-    <div class="card">
-      <h2 class="card-title">Something looks wrong?</h2>
-      <p class="card-body">
-        Report the problem, then pull the kill switch. Rolling back is a flag change,
-        not a deploy.
+    <section class="card">
+      <h2>Evaluation context</h2>
+      <p class="ctx-identity">
+        <span id="ctx-name">{{ state.visitor.name }}</span>
+        <span id="ctx-key" class="muted small">{{ state.visitor.key }}</span>
       </p>
+      <p id="ctx-blurb" class="ctx-blurb">{{ state.visitor.blurb }}</p>
+      {# These are the attributes targeting rules are built on in the
+         LaunchDarkly UI. They are sent with every evaluation. #}
+      <div id="ctx-attrs" class="chips">
+        {% for name, value in state.attributes.items() %}
+          <span class="chip"><b>{{ name }}</b>{{ value }}</span>
+        {% endfor %}
+      </div>
+    </section>
 
-      <button class="btn btn-secondary" id="report-bug-btn">
-        Report a problem
-        <span class="btn-sub">sends a custom metric event</span>
-      </button>
-
-      {% if offline_self_test %}
-        <div class="self-test">
-          <span class="self-test-label">Self-test toggle</span>
-          <button class="btn btn-ghost" data-self-test="true">Flag ON</button>
-          <button class="btn btn-ghost" data-self-test="false">Flag OFF</button>
-        </div>
-      {% else %}
-        <button class="btn btn-danger" id="remediate-btn" {{ '' if remediation_ready else 'disabled' }}>
-          Emergency rollback
-          <span class="btn-sub">
-            {% if remediation_ready %}fires the {{ remediation_method }}{% else %}not configured — see README{% endif %}
-          </span>
-        </button>
-      {% endif %}
-
-      <p class="hint">
-        The same rollback from a terminal:<br>
-        <code>./scripts/remediate.sh</code>
+    <section class="card">
+      <h2>Measure it</h2>
+      <p class="muted small">
+        The hero's primary button sends a <code>landing-page-cta-click</code>
+        metric event, attributable to the variation that was served.
       </p>
-    </div>
+      <p id="cta-count" class="muted small">No conversions recorded yet.</p>
+    </section>
 
-    <div class="card">
-      <h2 class="card-title">Live event log</h2>
-      <ol class="event-log" id="event-log"></ol>
-    </div>
+    <section class="card">
+      <h2>Live connection</h2>
+      <p><span id="conn-status" class="conn">connecting…</span></p>
+      <ul id="event-log" class="log">
+        <li class="log-empty"><span class="log-text muted small">Waiting for events…</span></li>
+      </ul>
+    </section>
 
   </aside>
 </main>
 
-<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div id="toast" class="toast"></div>
 
-<script>
-  // Handed to app.js so the browser starts from the same state the server just
-  // rendered, instead of flashing an empty panel while the stream connects.
-  window.__INITIAL_STATE__ = {{ bootstrap_state | tojson }};
-  window.__OFFLINE_SELF_TEST__ = {{ offline_self_test | tojson }};
-</script>
+{# The server already rendered the hero into the page, so this bootstrap payload
+   deliberately omits heroHtml — no need to ship the same markup twice. #}
+<script>window.__INITIAL_STATE__ = {{ bootstrap_state | tojson }};</script>
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
 </html>

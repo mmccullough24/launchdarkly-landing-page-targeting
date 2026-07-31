@@ -1,36 +1,42 @@
-/* Browser side of the demo.
+/* Browser side of the landing page targeting demo.
  *
- * The only job of this file is to hold a Server-Sent Events connection open and
- * apply whatever the server pushes down it. There is no polling, no timer, and
- * no reload: when the flag flips in LaunchDarkly, the server re-renders the
- * panel and sends it, and the swap you see below happens in the next frame.
+ * This file holds a Server-Sent Events connection open and applies whatever the
+ * server pushes down it. There is no polling, no timer, and no reload: when you
+ * change targeting in LaunchDarkly, the server re-evaluates the flag for this
+ * visitor's context, re-renders the hero, and sends it.
  *
- * Note that the browser never talks to LaunchDarkly directly and never sees the
- * SDK key. All flag evaluation happens server-side in the Python SDK.
+ * The browser never talks to LaunchDarkly and never sees the SDK key. All flag
+ * evaluation happens server-side in the Python SDK, which is why the targeting
+ * attributes below can include things you would not want to expose publicly.
  */
 
 (function () {
   "use strict";
 
   var els = {
-    panel: document.getElementById("feature-panel"),
-    variantBadge: document.getElementById("variant-badge"),
-    updatedAt: document.getElementById("updated-at"),
-    statePill: document.getElementById("state-pill"),
+    heroMount: document.getElementById("hero-mount"),
+    variationPill: document.getElementById("variation-pill"),
+    variationIndex: document.getElementById("variation-index"),
+    mechanism: document.getElementById("mechanism-badge"),
     reason: document.getElementById("reason-text"),
-    evalContext: document.getElementById("eval-context"),
-    evalAttrs: document.getElementById("eval-attrs"),
+    expected: document.getElementById("expected-line"),
+    ctxName: document.getElementById("ctx-name"),
+    ctxKey: document.getElementById("ctx-key"),
+    ctxBlurb: document.getElementById("ctx-blurb"),
+    ctxAttrs: document.getElementById("ctx-attrs"),
+    ctaCount: document.getElementById("cta-count"),
     conn: document.getElementById("conn-status"),
     log: document.getElementById("event-log"),
     toast: document.getElementById("toast"),
   };
 
   var state = window.__INITIAL_STATE__;
-  var personaId = state.persona.id;
-  var lastFlagValue = state.flagValue;
+  var visitorId = state.visitor.id;
+  var lastVariation = state.variation;
   var source = null;
+  var conversions = 0;
 
-  // ---------------------------------------------------------------- helpers
+  // ----------------------------------------------------------------- helpers
 
   function now() {
     return new Date().toLocaleTimeString([], { hour12: false });
@@ -38,12 +44,11 @@
 
   function addLog(text, kind) {
     var empty = els.log.querySelector(".log-empty");
-    if (empty) { empty.parentNode.remove(); }
+    if (empty) { empty.remove(); }
 
     var li = document.createElement("li");
     if (kind) { li.className = "kind-" + kind; }
-    li.innerHTML =
-      '<span class="log-time"></span><span class="log-text"></span>';
+    li.innerHTML = '<span class="log-time"></span><span class="log-text"></span>';
     li.querySelector(".log-time").textContent = now();
     li.querySelector(".log-text").textContent = text;
     els.log.prepend(li);
@@ -56,7 +61,7 @@
     els.toast.textContent = message;
     els.toast.className = "toast show" + (isError ? " error" : "");
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { els.toast.className = "toast"; }, 4500);
+    toastTimer = setTimeout(function () { els.toast.className = "toast"; }, 4000);
   }
 
   function postJson(url, body) {
@@ -76,63 +81,81 @@
     return "s-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
   }
 
-  // ------------------------------------------------------------ apply state
+  // Human-readable name for each targeting mechanism, used in the event log.
+  var MECHANISM_LABEL = {
+    individual: "individual target",
+    rule: "targeting rule",
+    default: "default rule",
+    off: "flag off",
+    error: "evaluation error",
+  };
+
+  // ------------------------------------------------------------- apply state
 
   function applyState(next, isFirstFrame) {
-    var changed = next.flagValue !== lastFlagValue;
+    var changed = next.variation !== lastVariation;
 
-    // Swap the feature panel. This is the "instant release / instant rollback"
-    // moment — the DOM for the whole feature is replaced in place. The very
-    // first frame carries no HTML: the server already rendered that panel.
-    if (next.panelHtml) { els.panel.innerHTML = next.panelHtml; }
+    // Swap the flagged component. This is the moment worth watching: the whole
+    // hero is replaced in place, with no reload and no flash of the old page.
+    // The very first frame carries no HTML — the server already rendered it.
+    if (next.heroHtml) { els.heroMount.innerHTML = next.heroHtml; }
     if (changed && !isFirstFrame) {
-      els.panel.classList.remove("is-swapping");
-      void els.panel.offsetWidth;            // restart the CSS animation
-      els.panel.classList.add("is-swapping");
+      els.heroMount.classList.remove("is-swapping");
+      void els.heroMount.offsetWidth;          // restart the CSS animation
+      els.heroMount.classList.add("is-swapping");
     }
 
-    els.variantBadge.textContent = next.variantLabel;
-    els.updatedAt.textContent = "updated at " + next.timestamp;
+    els.variationPill.textContent = next.variation;
+    els.variationPill.className = "variation-pill var-" + next.variation;
+    els.variationIndex.textContent =
+      next.variationIndex === null ? "fallback value" : "index " + next.variationIndex;
+
+    els.mechanism.textContent = next.reasonKind;
+    els.mechanism.className = "mechanism mech-" + next.mechanism;
     els.reason.textContent = next.reasonText;
 
-    els.statePill.textContent = next.flagValue ? "released" : "not released";
-    els.statePill.className = "state-pill " + (next.flagValue ? "on" : "off");
+    els.expected.className = "expected " + (next.expected.matches ? "ok" : "pending");
+    els.expected.innerHTML = "";
+    els.expected.append(
+      next.expected.matches ? "✓ " : "· ",
+      "Expected ",
+      Object.assign(document.createElement("b"), { textContent: next.expected.variation }),
+      " via ",
+      Object.assign(document.createElement("b"), { textContent: next.expected.via })
+    );
 
-    els.evalContext.innerHTML =
-      '<span class="ctx-name"></span> <span class="muted"></span>';
-    els.evalContext.querySelector(".ctx-name").textContent = next.persona.name;
-    els.evalContext.querySelector(".muted").textContent = "(" + next.persona.key + ")";
+    els.ctxName.textContent = next.visitor.name;
+    els.ctxKey.textContent = next.visitor.key;
+    els.ctxBlurb.textContent = next.visitor.blurb;
 
-    els.evalAttrs.innerHTML = "";
-    [
-      ["role", next.persona.role],
-      ["betaTester", String(next.persona.betaTester)],
-      ["plan", next.persona.plan],
-    ].forEach(function (pair) {
+    els.ctxAttrs.innerHTML = "";
+    Object.keys(next.attributes).forEach(function (name) {
       var chip = document.createElement("span");
       chip.className = "chip";
-      chip.textContent = pair[0] + ": " + pair[1];
-      els.evalAttrs.appendChild(chip);
+      var label = document.createElement("b");
+      label.textContent = name;
+      chip.append(label, String(next.attributes[name]));
+      els.ctxAttrs.appendChild(chip);
     });
 
     if (changed && !isFirstFrame) {
       addLog(
-        next.flagValue
-          ? "Flag ON — " + next.persona.name + " now sees Order Insights v2."
-          : "Flag OFF — " + next.persona.name + " rolled back to v1.",
-        next.flagValue ? "release" : "rollback"
+        next.visitor.name + " now sees '" + next.variation + "' — served by the " +
+        (MECHANISM_LABEL[next.mechanism] || next.mechanism) + ".",
+        next.variation === "control" ? "rollback" : "release"
       );
     } else if (next.source === "connected") {
       addLog(
-        "Watching " + next.flagKey + " for " + next.persona.name +
-        " (currently " + (next.flagValue ? "ON" : "OFF") + ").");
+        "Watching " + next.flagKey + " for " + next.visitor.name +
+        " (currently '" + next.variation + "' via " + next.reasonKind + ")."
+      );
     }
 
     if (next.isFallback) {
-      addLog("Served the code fallback value — LaunchDarkly could not decide.", "rollback");
+      addLog("Served the code fallback — LaunchDarkly could not decide.", "rollback");
     }
 
-    lastFlagValue = next.flagValue;
+    lastVariation = next.variation;
     state = next;
   }
 
@@ -141,9 +164,8 @@
   function connect() {
     if (source) { source.close(); }
 
-    var sessionId = newSessionId();
-    var url = "/api/stream?session=" + encodeURIComponent(sessionId) +
-              "&user=" + encodeURIComponent(personaId);
+    var url = "/api/stream?session=" + encodeURIComponent(newSessionId()) +
+              "&visitor=" + encodeURIComponent(visitorId);
     source = new EventSource(url);
 
     source.addEventListener("open", function () {
@@ -162,58 +184,50 @@
     });
   }
 
-  // ----------------------------------------------------------------- wiring
+  // ------------------------------------------------------------------ wiring
 
-  document.querySelectorAll(".persona-btn").forEach(function (button) {
+  document.querySelectorAll(".visitor-btn").forEach(function (button) {
     button.addEventListener("click", function () {
-      personaId = button.dataset.persona;
-      document.querySelectorAll(".persona-btn").forEach(function (other) {
+      visitorId = button.dataset.visitor;
+      document.querySelectorAll(".visitor-btn").forEach(function (other) {
         other.classList.toggle("is-active", other === button);
       });
-      addLog("Switched to " + button.textContent.trim().split("\n")[0] + ".");
+      addLog("Previewing as " + button.textContent.trim() + ".");
       // Re-open the stream so the server evaluates the flag for the new
       // LaunchDarkly context and registers a listener for it.
       connect();
     });
   });
 
-  var reportBtn = document.getElementById("report-bug-btn");
-  if (reportBtn) {
-    reportBtn.addEventListener("click", function () {
-      postJson("/api/report-bug", { user: personaId }).then(function (result) {
-        toast(result.data.message, !result.ok);
-        addLog("Reported a problem — custom metric event sent to LaunchDarkly.");
-      });
-    });
-  }
-
-  var remediateBtn = document.getElementById("remediate-btn");
-  if (remediateBtn) {
-    remediateBtn.addEventListener("click", function () {
-      remediateBtn.disabled = true;
-      addLog("Kill switch fired — asking LaunchDarkly to turn the flag off.", "rollback");
-      postJson("/api/remediate", {})
-        .then(function (result) {
-          toast(result.data.message, !result.ok);
-          if (!result.ok) { addLog("Kill switch failed: " + result.data.message, "rollback"); }
-        })
-        .catch(function (error) { toast("Request failed: " + error, true); })
-        .finally(function () {
-          setTimeout(function () { remediateBtn.disabled = false; }, 2000);
-        });
-    });
-  }
-
-  document.querySelectorAll("[data-self-test]").forEach(function (button) {
-    button.addEventListener("click", function () {
-      postJson("/api/self-test/toggle", { value: button.dataset.selfTest === "true" })
-        .then(function (result) { if (!result.ok) { toast(result.data.message, true); } });
+  // Delegated: the CTA lives inside the hero, which is replaced wholesale on
+  // every variation change, so binding directly would not survive a swap.
+  els.heroMount.addEventListener("click", function (event) {
+    if (!event.target.closest("#hero-cta")) { return; }
+    postJson("/api/cta-click", { visitor: visitorId }).then(function (result) {
+      toast(result.data.message, !result.ok);
+      if (result.ok) {
+        conversions += 1;
+        els.ctaCount.textContent =
+          conversions + (conversions === 1 ? " conversion" : " conversions") +
+          " sent this session (last: '" + state.variation + "').";
+        addLog("Conversion event sent for variation '" + state.variation + "'.", "metric");
+      }
     });
   });
 
-  // ------------------------------------------------------------------ start
+  document.querySelectorAll("[data-offline-targeting]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      var on = button.dataset.offlineTargeting === "true";
+      postJson("/api/offline/targeting", { on: on }).then(function (result) {
+        if (!result.ok) { toast(result.data.message, true); }
+        else { addLog("Targeting turned " + (on ? "ON" : "OFF") + ".", on ? "release" : "rollback"); }
+      });
+    });
+  });
 
-  addLog("Dashboard loaded.");
+  // ------------------------------------------------------------------- start
+
+  addLog("Landing page loaded.");
   applyState(state, true);
   connect();
 
