@@ -1,0 +1,14 @@
+# The LaunchDarkly server-side SDK for Python. This is the only LaunchDarkly
+# dependency the demo needs — streaming updates and the flag change listener
+# used in ld_integration.py are both built in.
+launchdarkly-server-sdk>=9.16.1,<10
+
+# Web framework for the demo dashboard. Flask's built-in server is threaded,
+# which is all the Server-Sent Events stream in app.py requires.
+flask>=3.0,<4
+
+# Loads the SDK key and other settings from your local .env file.
+python-dotenv>=1.0
+
+# Used by remediation.py to call the LaunchDarkly trigger URL / REST API.
+requests>=2.31

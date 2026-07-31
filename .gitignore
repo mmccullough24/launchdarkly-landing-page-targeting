@@ -1,0 +1,16 @@
+# Secrets — never commit a real SDK key, API token, or trigger URL.
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Editors / OS
+.claude/*.tmp.*
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store

@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ABC Company &middot; Order Insights</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>&#9679;</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">ABC</span>
+    <span class="brand-name">Company&nbsp;<span class="brand-sub">Operations Cloud</span></span>
+  </div>
+
+  <!-- Switching personas re-opens the live stream for a different LaunchDarkly
+       context. It is how you show one flag serving different values to
+       different people at the same moment. -->
+  <div class="persona-switch" role="group" aria-label="View the dashboard as">
+    <span class="persona-switch-label">Signed in as</span>
+    {% for persona_id, persona in personas.items() %}
+      <button class="persona-btn{{ ' is-active' if persona_id == state.persona.id }}"
+              data-persona="{{ persona_id }}"
+              title="{{ persona.blurb }}">
+        {{ persona.name }}
+        <span class="persona-btn-role">{{ persona.title }}</span>
+      </button>
+    {% endfor %}
+  </div>
+</header>
+
+{% if offline_self_test %}
+<div class="banner banner-warn">
+  <strong>Offline self-test mode.</strong> This app is not connected to LaunchDarkly; the flag
+  is served from an in-memory test data source. Unset <code>OFFLINE_SELF_TEST</code> in your
+  <code>.env</code> for the real demo.
+</div>
+{% endif %}
+
+<main class="layout">
+
+  <!-- ===== The feature ==================================================== -->
+  <section class="feature-column">
+    <div class="feature-meta">
+      <span class="variant-badge" id="variant-badge">{{ state.variantLabel }}</span>
+      <span class="updated" id="updated-at">rendered at {{ state.timestamp }}</span>
+    </div>
+
+    <!-- The server renders the initial panel; after that, every update to this
+         element arrives over the SSE stream in static/js/app.js. -->
+    <div id="feature-panel" class="panel-host">
+      {{ state.panelHtml | safe }}
+    </div>
+
+    <p class="footnote">
+      Both versions of this panel live in <code>features/order_insights.py</code>.
+      The flag decides which one renders; neither knows LaunchDarkly exists.
+    </p>
+  </section>
+
+  <!-- ===== Release control rail =========================================== -->
+  <aside class="control-column">
+
+    <div class="card">
+      <h2 class="card-title">Release control</h2>
+
+      <div class="flag-row">
+        <code class="flag-key">{{ flag_key }}</code>
+        <span class="state-pill" id="state-pill">…</span>
+      </div>
+
+      <p class="reason" id="reason-text">{{ state.reasonText }}</p>
+
+      <dl class="kv">
+        <dt>Evaluated for</dt>
+        <dd id="eval-context">{{ state.persona.name }} <span class="muted">({{ state.persona.key }})</span></dd>
+        <dt>Attributes</dt>
+        <dd class="attrs" id="eval-attrs">
+          <span class="chip">role: {{ state.persona.role }}</span>
+          <span class="chip">betaTester: {{ state.persona.betaTester | lower }}</span>
+          <span class="chip">plan: {{ state.persona.plan }}</span>
+        </dd>
+        <dt>Live connection</dt>
+        <dd><span class="conn" id="conn-status">connecting…</span></dd>
+      </dl>
+
+      <p class="hint">
+        Toggle <code>{{ flag_key }}</code> in LaunchDarkly and watch this page change.
+        Do not refresh — that is the point.
+      </p>
+    </div>
+
+    <div class="card">
+      <h2 class="card-title">Something looks wrong?</h2>
+      <p class="card-body">
+        Report the problem, then pull the kill switch. Rolling back is a flag change,
+        not a deploy.
+      </p>
+
+      <button class="btn btn-secondary" id="report-bug-btn">
+        Report a problem
+        <span class="btn-sub">sends a custom metric event</span>
+      </button>
+
+      {% if offline_self_test %}
+        <div class="self-test">
+          <span class="self-test-label">Self-test toggle</span>
+          <button class="btn btn-ghost" data-self-test="true">Flag ON</button>
+          <button class="btn btn-ghost" data-self-test="false">Flag OFF</button>
+        </div>
+      {% else %}
+        <button class="btn btn-danger" id="remediate-btn" {{ '' if remediation_ready else 'disabled' }}>
+          Emergency rollback
+          <span class="btn-sub">
+            {% if remediation_ready %}fires the {{ remediation_method }}{% else %}not configured — see README{% endif %}
+          </span>
+        </button>
+      {% endif %}
+
+      <p class="hint">
+        The same rollback from a terminal:<br>
+        <code>./scripts/remediate.sh</code>
+      </p>
+    </div>
+
+    <div class="card">
+      <h2 class="card-title">Live event log</h2>
+      <ol class="event-log" id="event-log"></ol>
+    </div>
+
+  </aside>
+</main>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+  // Handed to app.js so the browser starts from the same state the server just
+  // rendered, instead of flashing an empty panel while the stream connects.
+  window.__INITIAL_STATE__ = {{ bootstrap_state | tojson }};
+  window.__OFFLINE_SELF_TEST__ = {{ offline_self_test | tojson }};
+</script>
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
