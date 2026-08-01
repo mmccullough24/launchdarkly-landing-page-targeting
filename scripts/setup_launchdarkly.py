@@ -299,8 +299,10 @@ def setup() -> None:
         instructions.append({"kind": "turnFlagOn"})
 
     # --- individual targeting ---------------------------------------------
-    # Evaluated before every rule, so this wins even though Avery would also
-    # match the beta-tester rule. That precedence is the point of the demo.
+    # Evaluated before every rule, so a pinned visitor gets the pinned variation
+    # whatever the rules below say. Note that Avery's plan is `internal`, which
+    # does not satisfy the beta-tester rule — so this target is also the only
+    # thing giving Avery anything other than the control.
     already_targeted = any(
         INDIVIDUAL_TARGET_KEY in target.get("values", [])
         for target in env.get("targets", [])

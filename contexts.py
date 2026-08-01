@@ -10,7 +10,13 @@ The demo ships five fixed visitors so you can switch between them in the browser
 and watch one flag serve three different heroes. Between them they exercise
 every targeting path:
 
-    Avery Chen   -> matched by an INDIVIDUAL TARGET  (overrides every rule)
+    Avery Chen   -> matched by an INDIVIDUAL TARGET  (takes precedence over any
+                                                      rule; note that Avery's
+                                                      plan is `internal`, so no
+                                                      rule matches Avery anyway
+                                                      — remove the target and
+                                                      Avery falls through to
+                                                      the control)
     Jordan Blake -> matched by a  TARGETING RULE     (enterprise + beta tester)
     Priya Raman  -> matched by the same RULE         (pro + beta tester)
     Sam Okafor   -> falls through to the DEFAULT     (enterprise, but not a

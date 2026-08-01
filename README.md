@@ -48,7 +48,7 @@ account yet, there is a fully working
 | --- | --- |
 | **Feature flag around a component** | The landing page hero is wrapped in a single string flag, `landing-page-hero`, with three variations: `control`, `spotlight`, `conversion`. All three heroes are in the codebase at once; LaunchDarkly decides which one each visitor gets. |
 | **Evaluation context with user attributes** | Every evaluation sends a LaunchDarkly context carrying `role`, `plan`, `betaTester`, `region`, `accountAgeDays`, and `deviceType`. These are defined in `contexts.py` and are exactly what the targeting rules are built on. |
-| **Individual targeting** | One named user — `user-avery-chen` — is pinned by key to the `conversion` variation. Individual targets are evaluated *before* any rule, so this wins even though that user would also match the rule below. |
+| **Individual targeting** | One named user — `user-avery-chen` — is pinned by key to the `conversion` variation, regardless of attributes. Individual targets are evaluated *before* any rule, so pinning someone overrides whatever a rule would have served them. |
 | **Rule-based targeting** | A rule serves `spotlight` to everyone where `betaTester is true` **AND** `plan is one of (enterprise, pro)`. One rule, an entire audience, no code change. |
 | **Everyone else** | The default rule serves `control` — what almost all 40,000 daily visitors receive. |
 
@@ -257,8 +257,9 @@ production before any customer does.
 4. Save.
 
 That is individual targeting: matched **by key**, not by attributes. It is
-evaluated before every rule, which is why Avery gets `conversion` even though the
-rule you are about to write would also match.
+evaluated before every rule, so a pinned visitor gets the pinned variation no
+matter what the rules below say. Part 2 of the walkthrough demonstrates that
+precedence directly.
 
 #### 5b — Rule-based targeting
 
@@ -416,13 +417,24 @@ for each variation is a product decision, made in the LaunchDarkly UI.
 
 ### Part 2 — Individual targeting beats rules
 
-Avery Chen has `betaTester: true` and would match the rule — but is served
-`conversion`, not `spotlight`.
+Jordan Blake currently matches the rule and is served `spotlight`. Pin Jordan by
+name and watch the individual target win.
 
-Prove it: in LaunchDarkly, remove `user-avery-chen` from the individual targets
-and save. **Watch the browser with Avery selected.** Without a reload, the hero
-becomes `spotlight` and the reason flips from `TARGET_MATCH` to `RULE_MATCH`.
-Add the individual target back and it returns to `conversion`.
+1. In LaunchDarkly, add `user-jordan-blake` to the flag's individual targets,
+   serving the `conversion` variation. Save.
+2. **Watch the browser with Jordan selected.** Without a reload the hero becomes
+   `conversion`, and the reason flips from `RULE_MATCH` to `TARGET_MATCH`.
+3. Remove that individual target again and Jordan returns to `spotlight`.
+
+Nothing about the rule changed — it still matches Jordan perfectly. The
+individual target is simply evaluated first.
+
+> **Why not try this with Avery Chen?** Because Avery's `plan` is `internal`,
+> which fails the rule's `plan is one of (enterprise, pro)` clause. Remove
+> Avery's individual target and the result is `control` via `FALLTHROUGH`, not
+> `spotlight` — there is no rule for Avery to fall back to. That is worth seeing
+> once too: individual targeting is often used for exactly this, reaching someone
+> no rule covers.
 
 That precedence — individual targets, then rules in order, then the default rule
 — is what lets you make an exception for one person without touching the rule
